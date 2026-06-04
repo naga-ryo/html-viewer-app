@@ -29,7 +29,7 @@
 
         .header-content {
             padding: 15px 20px 0 20px;
-            max-height: 200px;
+            max-height: 280px;
             opacity: 1;
             overflow: hidden;
             transition: max-height 0.3s ease, opacity 0.2s ease, padding 0.3s ease;
@@ -75,7 +75,7 @@
             display: flex;
             justify-content: center;
             gap: 10px;
-            margin-bottom: 10px;
+            margin-bottom: 15px;
         }
         .file-input-wrapper {
             position: relative;
@@ -101,6 +101,26 @@
         input[type=file] {
             display: none;
         }
+        
+        .disclaimer {
+            background-color: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            color: #fca5a5;
+            font-size: 11px;
+            padding: 10px;
+            border-radius: 6px;
+            margin: 0 auto 10px auto;
+            max-width: 480px;
+            text-align: left;
+            line-height: 1.5;
+        }
+        .disclaimer strong {
+            color: #f87171;
+            font-size: 12px;
+            display: block;
+            margin-bottom: 4px;
+        }
+
         .viewer-container {
             flex-grow: 1;
             width: 100%;
@@ -173,6 +193,13 @@
                     <input type="file" id="folder-input" webkitdirectory directory multiple>
                 </div>
             </div>
+
+            <div class="disclaimer">
+                <strong>⚠️ ご利用上の注意と免責事項</strong>
+                ・ファイルはサーバーに送信されず、すべてお使いのブラウザ内で安全に処理されます。<br>
+                ・セキュリティ保護のため、<b>出所不明の不審なHTMLファイルは絶対に読み込まない</b>でください。<br>
+                ・本ツールの利用により生じたいかなる損害についても、作成者は一切の責任を負いません。
+            </div>
         </div>
         <div class="grab-handle-container" id="toggle-header">
             <div class="grab-handle"></div>
@@ -187,89 +214,76 @@
         const header = document.getElementById('app-header');
         const toggleBtn = document.getElementById('toggle-header');
         const loadingOverlay = document.getElementById('loading-overlay');
+        const iframe = document.getElementById('viewer-frame');
         
-        toggleBtn.addEventListener('click', function() {
-            header.classList.toggle('minimized');
-        });
+        toggleBtn.addEventListener('click', () => header.classList.toggle('minimized'));
 
-        // 共通のファイル処理ロジック
-        async function processFiles(files) {
-            const fileMap = {};
-            let mainHtmlFile = null;
-
-            for (const file of files) {
-                const fileName = file.webkitRelativePath ? file.webkitRelativePath.split('/').pop() : file.name;
-                
-                // index.htmlを優先、なければ最初のHTMLファイルをメインとする
-                if (fileName === 'index.html' || (!mainHtmlFile && fileName.endsWith('.html'))) {
-                    mainHtmlFile = file;
+        // 1. Service Workerの登録処理
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', async () => {
+                try {
+                    await navigator.serviceWorker.register('./sw.js');
+                    console.log('Service Worker 登録完了');
+                } catch (error) {
+                    console.error('Service Worker 登録失敗:', error);
                 }
-                
-                // 仮想URLの生成
-                fileMap[fileName] = URL.createObjectURL(file);
+            });
+        } else {
+            alert('お使いのブラウザはService Workerに対応していないため、このツールは動作しません。');
+        }
+
+        // ファイル選択時のメイン処理
+        async function triggerProcess(files) {
+            if (files.length === 0) return;
+            loadingOverlay.classList.add('active');
+
+            let mainHtmlPath = null;
+            const fileListData = [];
+
+            // 構造化複製（Message送信）のためにデータを整理
+            for (const file of files) {
+                const path = file.webkitRelativePath || file.name;
+                fileListData.push({ path: path, file: file });
+
+                if (!mainHtmlPath && path.endsWith('.html')) mainHtmlPath = path;
+                if (path.endsWith('index.html')) mainHtmlPath = path;
             }
 
-            if (!mainHtmlFile) {
-                alert("選択された中にHTMLファイルが見つかりません。");
+            if (!mainHtmlPath) {
+                alert("HTMLファイルが見つかりません。");
                 loadingOverlay.classList.remove('active');
                 return;
             }
 
-            const reader = new FileReader();
-            reader.onload = function(event) {
-                const htmlContent = event.target.result;
-                const parser = new DOMParser();
-                const doc = parser.parseFromString(htmlContent, 'text/html');
-
-                // CSSの書き換え
-                doc.querySelectorAll('link[rel="stylesheet"]').forEach(link => {
-                    const href = link.getAttribute('href');
-                    const cleanHref = href ? href.split('/').pop() : '';
-                    if (cleanHref && fileMap[cleanHref]) {
-                        link.setAttribute('href', fileMap[cleanHref]);
-                    }
-                });
-
-                // JSの書き換え
-                doc.querySelectorAll('script[src]').forEach(script => {
-                    const src = script.getAttribute('src');
-                    const cleanSrc = src ? src.split('/').pop() : '';
-                    if (cleanSrc && fileMap[cleanSrc]) {
-                        script.setAttribute('src', fileMap[cleanSrc]);
-                    }
-                });
-
-                const iframe = document.getElementById('viewer-frame');
-                
-                iframe.onload = function() {
-                    loadingOverlay.classList.remove('active');
-                    header.classList.add('minimized');
-                };
-                
-                iframe.srcdoc = doc.documentElement.outerHTML;
+            // 2. Service Workerが有効になるのを待ってからファイルを転送
+            const registration = await navigator.serviceWorker.ready;
+            const messageChannel = new MessageChannel();
+            
+            // Service Worker側での登録完了通知を受け取る
+            messageChannel.port1.onmessage = (event) => {
+                if (event.data && event.data.success) {
+                    // 3. 転送完了後、仮想URL（virtual-root）をiframeのsrcにセットして読み込む
+                    iframe.onload = () => {
+                        loadingOverlay.classList.remove('active');
+                        header.classList.add('minimized');
+                    };
+                    // 文字列の書き換えはせず、仮想パスへ直接アクセス
+                    iframe.src = './virtual-root/' + mainHtmlPath;
+                }
             };
-            
-            reader.readAsText(mainHtmlFile);
+
+            // アクティブなService Workerへファイルを一括送信
+            const targetWorker = navigator.serviceWorker.controller || registration.active;
+            if (targetWorker) {
+                targetWorker.postMessage(
+                    { type: 'REGISTER_FILES', files: fileListData },
+                    [messageChannel.port2]
+                );
+            }
         }
 
-        function triggerProcess(files) {
-            if (files.length === 0) return;
-            loadingOverlay.classList.add('active');
-            
-            setTimeout(() => {
-                processFiles(files);
-            }, 50);
-        }
-
-        // ファイルのイベント
-        document.getElementById('file-input').addEventListener('change', function(e) {
-            triggerProcess(Array.from(e.target.files));
-        });
-
-        // フォルダのイベント
-        document.getElementById('folder-input').addEventListener('change', function(e) {
-            triggerProcess(Array.from(e.target.files));
-        });
+        document.getElementById('file-input').addEventListener('change', e => triggerProcess(Array.from(e.target.files)));
+        document.getElementById('folder-input').addEventListener('change', e => triggerProcess(Array.from(e.target.files)));
     </script>
 
 </body>
